@@ -144,7 +144,8 @@ ependGenes <- c(
 embryFuses <- c(
   "CIC--NUTM1",
   "MN1--BEND2",
-  "MN1--CXXC5"
+  "MN1--CXXC5",
+  "EWSR1--PLAGL1" # add the desired fusion to the embryonal tumor analysis
 )
 embryGenes <- c(
   "FOXR2",
@@ -227,6 +228,9 @@ allFuseEmbry[, missingEmbryFusion] <- 0
 # Write to file
 allFuseEmbry %>%
   arrange(Kids_First_Biospecimen_ID) %>%
+  # sort the columns to match the existing results file in the repo
+  select(order(colnames(.))) %>%
+  relocate(Kids_First_Biospecimen_ID) %>%
   write_tsv(embryFile)
 ```
 
