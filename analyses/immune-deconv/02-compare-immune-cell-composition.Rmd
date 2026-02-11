@@ -1,0 +1,237 @@
+---
+title: "Medulloblastoma Subtype Immune Cell Composition"
+author: "Rehman Qureshi"
+output:
+  html_document:
+    df_print: paged
+---
+## Set Up
+This script assumes that 01-immune-deconv.R has been executed and uses the existing output files in the results folder.
+```{r,message=F,warning=F}
+# load packages
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(ggbeeswarm))
+suppressWarnings(library(vegan))
+suppressWarnings(library(ggplot2))
+suppressWarnings(library(stringr))
+
+# Check if results file exist and load them
+if (!dir.exists('results')) {
+    stop("Error: The  results directory was not found. Please execute '01-immune-deconv.R'", call. = FALSE)
+} 
+if (file.exists('results/quantiseq_output.rds')) {
+    qs_data <- readRDS('results/quantiseq_output.rds')
+} else {
+    stop("Error: results/quantiseq_output.rds was not found. Please execute '01-immune-deconv.R'", call. = FALSE)
+}
+if (file.exists('results/xcell_output.rds')) {
+    xcell_data <- readRDS('results/xcell_output.rds')
+} else {
+    stop("Error: results/xcell_output.rds was not found. Please execute '01-immune-deconv.R'", call. = FALSE)
+}
+
+# filter files to include only Medulloblastoma samples
+qs_data <- qs_data %>%
+    dplyr::filter(cancer_group == 'Medulloblastoma')
+xcell_data <- xcell_data %>%
+    dplyr::filter(cancer_group == 'Medulloblastoma') %>%
+    dplyr::filter(!str_detect(cell_type,'score')) # remove variables that are not proportions
+    
+```
+
+## Statistical analysis of differential Immune Cell Type Proportions determined by Quantiseq
+To test the whether the molecular subtype of the tumor has an effect on the distribution of fractions of the immune cell types we can employ Permutational Multivariate Analysis of Variance (PERMANOVA) as implemented in the vegan package.
+```{r}
+qs_data_trans <- qs_data 
+qs_data_trans <- qs_data_trans %>%
+    dplyr::select(Kids_First_Biospecimen_ID,molecular_subtype,cell_type,fraction) %>%
+    tidyr::pivot_wider(
+        names_from='cell_type',
+        values_from='fraction',
+        id_cols=c('Kids_First_Biospecimen_ID','molecular_subtype')
+    )
+qs_dist_mat <- vegan::vegdist(qs_data_trans[,3:ncol(qs_data_trans)],method = 'bray')
+set.seed(117)
+permanova_result <- vegan::adonis2(qs_dist_mat ~ qs_data_trans$molecular_subtype)
+print(permanova_result)
+```
+We can reject the null hypothesis that the molecular subtypes all have the same immune cell compositions. PERMANOVA shows a significant difference in immune cell composition across molecular subtypes.
+
+## Dimension Reduction of Cell Type Proportion Data by Multidimensional Scaling (MDS)
+We can produce an MDS plot to look at overall differences in proportion using the previously computed Bray-Curtis distance matrix. On the MDS plot below we can see differences between molecular subtypes. 
+
+```{r}
+mds_result <- cmdscale(qs_dist_mat,k=2)
+mds_df <- data.frame(
+    Kids_First_Biospecimen_ID = qs_data_trans$Kids_First_Biospecimen_ID,
+    molecular_subtype = qs_data_trans$molecular_subtype,
+    MDS1 = mds_result[,1],
+    MDS2 = mds_result[,2]
+)
+qs_mds_plot <- mds_df %>%
+    ggplot(aes(x=MDS1,y=MDS2,color=molecular_subtype)) +
+        geom_point(size=1) +
+        ggtitle('Quantiseq Data MDS') +
+        theme_bw()
+show(qs_mds_plot)
+```
+
+
+## Hypothesis Testing the Difference of Each Cell Type Across Molecular Subtypes
+We can employ the Kruskal-Wallis test to assess whether there are differences in the proportion of each cell type across all 4 molecular subtypes and apply the Benjamini-Hochberg false discovery rate correction to correct for multiple comparisons.
+```{r}
+# Kruskal-Wallis Test per cell type
+qs_data_by_cell <- qs_data %>%
+    mutate(molecular_subtype = factor(molecular_subtype)) %>%
+    split(qs_data$cell_type)
+kw_pval <- list()
+for (cell in names(qs_data_by_cell)) {
+    kw_result <- kruskal.test(fraction ~ molecular_subtype,qs_data_by_cell[[cell]])
+    kw_pval[[cell]] <- kw_result$p.value
+}
+# FDR correction and formatting number for display on plot
+adj.pval <- scales::label_scientific(digits=3)(p.adjust(kw_pval,method='BH'))
+adj.pval <- lapply(adj.pval,\(x)str_glue('p={x}'))
+```
+
+
+## Visualize Quantiseq Estimated Cell Fractions
+Here we visualize the differences between cell type proportions as a swarm plot. Horizontal black lines indicate the median proportion across all samples in the sub group.
+P-values are Benjamini-Hochberg corrected Kruskal-Wallis p-values for each cell type.
+
+```{r,out.width='100%'}
+qs_swarmplot <- qs_data %>%
+    mutate(p.adj = recode(cell_type,!!!adj.pval)) %>%
+    group_by(cell_type) %>%
+    mutate(y_pos = .8*max(fraction)) %>%
+    ungroup() %>%
+    ggplot(aes(x=molecular_subtype,y=fraction,color = molecular_subtype)) +
+        geom_beeswarm(size=.1) +
+        stat_summary(fun=median,color='black',geom='crossbar',linewidth = .1) +
+        geom_text(aes(x=2.5,y=y_pos,label=p.adj),color='black',size=3,alpha=.5) +
+        # ggpubr::stat_kruskal_test(p.adjust.method='BH', label.y.npc = .7,label='p.adj') +
+        facet_wrap(~ cell_type,scales = 'free_y',labeller = label_wrap_gen(20)) +
+        scale_y_continuous(labels = scales::percent) +
+        ggtitle('Quantiseq Cell Type Fraction') +
+        theme_bw() %+replace%
+        theme(axis.text.x = element_text(angle=90,hjust=.95))
+        
+if (!dir.exists('fig')) {
+    dir.create('fig')
+}
+ggsave(plot=qs_swarmplot,filename = 'fig/fig1.pdf',height=8,width=12)
+show(qs_swarmplot)
+```
+
+
+## Statistical analysis of differential Immune Cell Type Scores determined by XCell
+XCell outputs scores for cell types instead of proportions. The sample scores DO NOT sum to 1.
+
+```{r}
+xcell_data_trans <- xcell_data 
+xcell_data_trans <- xcell_data_trans %>%
+    dplyr::select(Kids_First_Biospecimen_ID,molecular_subtype,cell_type,fraction) %>%
+    tidyr::pivot_wider(
+        names_from='cell_type',
+        values_from='fraction',
+        id_cols=c('Kids_First_Biospecimen_ID','molecular_subtype')
+    )
+xcell_dist_mat <- vegan::vegdist(xcell_data_trans[,3:ncol(xcell_data_trans)],method = 'bray')
+set.seed(117)
+permanova_result <- vegan::adonis2(xcell_dist_mat ~ xcell_data_trans$molecular_subtype)
+print(permanova_result)
+```
+PERMANOVA shows that molecular subtypes have significantly different cell compositions.
+
+## Dimension Reduction of Cell Type Proportion Data by Multidimensional Scaling (MDS)
+We can produce an MDS plot to look at overall differences in proportion using the previously computed Bray-Curtis distance matrix. On the MDS plot below we can see differences between molecular subtypes. 
+
+```{r}
+xcell_mds_result <- cmdscale(xcell_dist_mat,k=2)
+mds_df <- data.frame(
+    Kids_First_Biospecimen_ID = xcell_data_trans$Kids_First_Biospecimen_ID,
+    molecular_subtype = xcell_data_trans$molecular_subtype,
+    MDS1 = xcell_mds_result[,1],
+    MDS2 = xcell_mds_result[,2]
+)
+xcell_mds_plot <- mds_df %>%
+    ggplot(aes(x=MDS1,y=MDS2,color=molecular_subtype)) +
+        geom_point(size=1) +
+        ggtitle('XCell Data MDS') +
+        theme_bw()
+show(xcell_mds_plot)
+```
+
+
+## Hypothesis Testing the Difference of Each Cell Type Across Molecular Subtypes
+We can employ the Kruskal-Wallis test to assess whether there are differences in the proportion of each cell type across all 4 molecular subtypes and apply the Benjamini-Hochberg false discovery rate correction to correct for multiple comparisons.
+
+```{r}
+# Kruskal-Wallis Test per cell type
+xcell_data_by_cell <- xcell_data %>%
+    mutate(molecular_subtype = factor(molecular_subtype)) %>%
+    split(xcell_data$cell_type)
+kw_pval <- list()
+for (cell in names(xcell_data_by_cell)) {
+    kw_result <- kruskal.test(fraction ~ molecular_subtype,xcell_data_by_cell[[cell]])
+    kw_pval[[cell]] <- kw_result$p.value
+}
+bh_pval <- p.adjust(kw_pval,method='BH')
+adj.pval <- scales::label_scientific(digits=3)(bh_pval)
+adj.pval <- lapply(adj.pval,\(x)str_glue('p={x}'))
+xcell_kw_results <- data.frame(cell_type = names(kw_pval),p=as.numeric(kw_pval),p.adj = as.numeric(bh_pval))
+```
+
+## Differentially Abundant XCell Predicted Cell Types according to Kruskal-Wallis Test
+```{r}
+print(dplyr::filter(xcell_kw_results,p.adj<.01))
+```
+
+
+
+## Visualize XCell Estimated Cell Fractions
+Here we visualize the differences between cell type proportions as a swarm plot. Horizontal black lines indicate the median proportion across all samples in the sub group. P-values are Benjamini-Hochberg corrected Kruskal-Wallis p-values for each cell type.
+
+```{r,fig.cap="Figure 1. Quantiseq cell proportion swarmplot, horizontal lines represent median proportion. Benjamini-Hochberg corrected Kruskal-Wallis p-values indicated.",out.width='100%'}
+# add p-values and compute coordinates for geom_text
+xcell_data <- xcell_data %>%
+    mutate(p.adj = recode(cell_type,!!!adj.pval)) %>%
+    group_by(cell_type) %>%
+    mutate(y_pos = .8*max(fraction)) %>%
+    ungroup() 
+xcell_swarmplot <- xcell_data %>%
+    ggplot(aes(x=molecular_subtype,y=fraction,color = molecular_subtype)) +
+        geom_beeswarm(size=.1) +
+        stat_summary(fun=median,color='black',geom='crossbar',linewidth = .1) +
+        geom_text(aes(x=2.5,y=y_pos,label=p.adj),color='black',size=3,alpha=.5) +
+        # ggpubr::stat_kruskal_test(p.adjust.method='BH', label.y.npc = .7,label='p.adj') +
+        facet_wrap(~ cell_type,scales = 'free_y',labeller = label_wrap_gen(12)) +
+        scale_y_continuous(labels = scales::percent) +
+        ggtitle('XCell Cell Type Fraction') +
+        theme_bw() %+replace%
+        theme(axis.text.x = element_text(angle=90,hjust=.95))
+        
+if (!dir.exists('fig')) {
+    dir.create('fig')
+}
+ggsave(plot=xcell_swarmplot,filename = 'fig/fig2.pdf',height=12,width=16)
+```
+Here we examine whether each cell type has a different distribution across all 4 molecular subtypes. We plot each cell type separately for legibility.
+```{r}
+# plot every cell type individually because the facet_grid plot doesn't show up well in html
+xcell_data_by_cell <- xcell_data %>%
+    mutate(molecular_subtype = factor(molecular_subtype)) %>%
+    split(xcell_data$cell_type)
+for (cell in names(xcell_data_by_cell)) {
+    swarmplot <- xcell_data_by_cell[[cell]] %>%
+        ggplot(aes(x=molecular_subtype,y=fraction,color = molecular_subtype)) +
+            geom_beeswarm(size=1) +
+            stat_summary(fun=median,color='black',geom='crossbar',linewidth = .1) +
+            geom_text(aes(x=2.5,y=y_pos,label=p.adj),color='black',size=5,alpha=.5) +
+            # ggpubr::stat_kruskal_test(p.adjust.method='BH', label.y.npc = .7,label='p.adj') +
+            scale_y_continuous(labels = scales::percent) +
+            ggtitle(cell) +
+            theme_bw() %+replace%
+            theme(axis.text.x = element_text(angle=90,hjust=.95))
+    show(swarmplot)
+}
