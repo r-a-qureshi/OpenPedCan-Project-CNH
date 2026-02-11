@@ -14,4 +14,6 @@ WORKDIR /rocker-build/
 # RUN R -q -e "install.packages(c('here','argparse'), repos='https://cloud.r-project.org')"
 # RUN python3 -m pip install --no-cache-dir some-extra-package==1.2.3
 
+# install ggbeeswarm for plots and vegan for stats
+RUN R -q -e "install.packages(c('ggbeeswarm','vegan'), repos='https://cloud.r-project.org')"
 
